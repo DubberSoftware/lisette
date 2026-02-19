@@ -210,18 +210,11 @@ def _apply_cache_idxs(
     cache_strategy: CacheStrategy=CacheStrategy.unspecified,
 ):
     'Add cache control to idxs after filtering tools'
-    print(f"LISETTE: applying cache idxs with strategy: {cache_strategy}")
-    if cache_strategy == CacheStrategy.unspecified:
-        print(f"_apply_cache_idxs passed cache_idxs={cache_idxs}")
-        if (-1 not in cache_idxs) and (len(cache_idxs) > 0 and cache_idxs[-1] != 0):
-            cache_idxs = list(cache_idxs) + [-1]
-            print(f"_apply_cache_idxs transformed cache_idxs={cache_idxs}")
+    if cache_strategy == CacheStrategy.unspecified: # use lisette default behaviour
+        ms = [o for o in msgs if o['role']!='tool']
         for i in cache_idxs:
-            try:
-                _add_cache_control(msgs[i], ttl)
-            except IndexError:
-                continue
-        return
+            try: _add_cache_control(ms[i], ttl)
+            except IndexError: continue
 
     ms = []
     if cache_strategy == CacheStrategy.no_caching:
@@ -417,7 +410,6 @@ class Chat:
             try: self.cache_strategy = CacheStrategy[cache_strategy]
             except: self.cache_strategy = CacheStrategy.unspecified
         else: self.cache_strategy = cache_strategy
-        print(f"LISETTE Chat client. cache_strategy={self.cache_strategy}")
         # set rest
         self.model = model
         self.tc_res = {} if tc_refs else None
@@ -431,7 +423,6 @@ class Chat:
     
     def _prep_msg(self, msg=None, prefill=None):
         "Prepare the messages list for the API call"
-        print(f"Cache idxs at _prep_msg start: {self.cache_idxs}")
         sp = [{"role": "system", "content": self.sp}] if self.sp else []
         if sp:
             if 0 in self.cache_idxs: sp[0] = _add_cache_control(sp[0])
@@ -439,7 +430,6 @@ class Chat:
         else:
             cache_idxs = self.cache_idxs
         if msg: self.hist = self.hist+[msg]
-        print(f"Cache idxs in _prep_msg: {self.cache_idxs}")
         self.hist = mk_msgs(self.hist, self.cache and 'claude' in self.model, cache_idxs, self.ttl, cache_strategy=self.cache_strategy)
         pf = [{"role":"assistant","content":prefill}] if prefill else []
         return sp + self.hist + pf
