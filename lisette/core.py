@@ -4,14 +4,15 @@
 
 # %% auto #0
 __all__ = ['sonn45', 'opus45', 'opus46', 'tool_dtls_tag', 're_tools', 'token_dtls_tag', 're_token', 'effort', 'tc_res_sysp',
-           'patch_litellm', 'remove_cache_ckpts', 'contents', 'stop_reason', 'mk_msg', 'fmt2hist', 'mk_msgs',
-           'stream_with_complete', 'lite_mk_func', 'ToolResponse', 'structured', 'cite_footnote', 'cite_footnotes',
-           'mk_stream_chunk', 'Chat', 'add_warning', 'random_tool_id', 'mk_tc', 'mk_tc_req', 'mk_tc_result',
-           'mk_tc_results', 'astream_with_complete', 'AsyncChat', 'mk_tr_details', 'fmt_usage', 'StreamFormatter',
-           'AsyncStreamFormatter', 'display_stream', 'adisplay_stream']
+           'patch_litellm', 'remove_cache_ckpts', 'contents', 'stop_reason', 'mk_msg', 'fmt2hist', 'CacheStrategy',
+           'mk_msgs', 'stream_with_complete', 'lite_mk_func', 'ToolResponse', 'structured', 'cite_footnote',
+           'cite_footnotes', 'mk_stream_chunk', 'Chat', 'add_warning', 'random_tool_id', 'mk_tc', 'mk_tc_req',
+           'mk_tc_result', 'mk_tc_results', 'astream_with_complete', 'AsyncChat', 'mk_tr_details', 'fmt_usage',
+           'StreamFormatter', 'AsyncStreamFormatter', 'display_stream', 'adisplay_stream']
 
 # %% ../nbs/00_core.ipynb #82380377
 import asyncio, base64, json, litellm, mimetypes, random, string, ast
+from enum import Enum
 from typing import Any, Optional, Callable
 from html import escape
 from litellm import (acompletion, completion, stream_chunk_builder, Message,
@@ -191,23 +192,64 @@ def fmt2hist(outp:str)->list:
     if hist and isinstance(hist[-1], dict): hist.append(Message('.'))
     return hist
 
+# %% ../nbs/00_core.ipynb #8b3f3828
+class CacheStrategy(str, Enum):
+    unspecified = "unspecified" # ignore strategy
+    no_caching = "no_caching" # no caching
+    system_only = "system_only" # only cache system prompt
+    first_only = "first_only" # cache first user prompt (and system prompt if present) only
+    no_tools = "no_tools" # cache everything but tool responses
+    cache_all = "cache_all" # cache everything
+
+
 # %% ../nbs/00_core.ipynb #02cb84da
-def _apply_cache_idxs(msgs, cache_idxs=[-1], ttl=None):
+def _apply_cache_idxs(
+    msgs: list,
+    cache_idxs: list[int]=[-1],
+    ttl: Optional[str]=None,
+    cache_strategy: CacheStrategy=CacheStrategy.unspecified,
+):
     'Add cache control to idxs after filtering tools'
-    if (-1 not in cache_idxs) and (len(cache_idxs) > 0 and cache_idxs[-1] != 0):
-        cache_idxs = list(cache_idxs) + [-1]
-    for i in cache_idxs:
-        try:
-            _add_cache_control(msgs[i], ttl)
-        except IndexError:
-            continue
+    if cache_strategy == CacheStrategy.unspecified: # use lisette default behaviour
+        ms = [o for o in msgs if o['role']!='tool']
+        for i in cache_idxs:
+            try: _add_cache_control(ms[i], ttl)
+            except IndexError: continue
+
+    ms = []
+    if cache_strategy == CacheStrategy.no_caching:
+        ms = []
+    elif cache_strategy == CacheStrategy.system_only:
+        ms = [o for o in msgs if o['role']=='system']
+    elif cache_strategy == CacheStrategy.first_only:
+        ms = []
+        for m in msgs:
+            if m['role']=="system":
+                ms.append(m)
+            elif m['role']=="user":
+                ms.append(m)
+                break
+    elif cache_strategy == CacheStrategy.no_tools:
+        ms = [o for o in msgs if o['role']!='tool']
+    elif cache_strategy == CacheStrategy.cache_all:
+        ms = msgs
+    else:
+        return
+    # claude limits cache control to at most 4 blocks (including system prompt, so 3 further)
+    # if we hit this case we assume we have cached earlier blocks in a previous call, so just cache last 4
+    if len(ms) > 3:
+        ms = ms[-3:]
+    for m in ms:
+        _add_cache_control(m, ttl)
+
 
 # %% ../nbs/00_core.ipynb #9b326d7d
 def mk_msgs(
-    msgs,                   # List of messages (each: str, bytes, list, or dict w 'role' and 'content' fields)
-    cache=False,            # Enable Anthropic caching
-    cache_idxs=[-1],        # Cache breakpoint idxs
-    ttl=None,               # Cache TTL: '5m' (default) or '1h'
+    msgs: list,                   # List of messages (each: str, bytes, list, or dict w 'role' and 'content' fields)
+    cache: bool=False,            # Enable Anthropic caching
+    cache_idxs: list[int]=[-1],   # Cache breakpoint idxs
+    ttl: Optional[str]=None,      # Cache TTL: '5m' (default) or '1h'
+    cache_strategy: CacheStrategy=CacheStrategy.unspecified,
 ):
     "Create a list of LiteLLM compatible messages."
     if not msgs: return []
@@ -217,7 +259,7 @@ def mk_msgs(
     for m in msgs:
         res.append(msg:=remove_cache_ckpts(mk_msg(m, role=role)))
         role = 'assistant' if msg['role'] in ('user','function', 'tool') else 'user'
-    if cache: _apply_cache_idxs(res, cache_idxs, ttl)
+    if cache: _apply_cache_idxs(res, cache_idxs, ttl, cache_strategy)
     return res
 
 # %% ../nbs/00_core.ipynb #9ad6fc2c
@@ -344,27 +386,36 @@ This is useful when chaining tools, e.g., reading data with one tool and passing
 class Chat:
     def __init__(
         self,
-        model:str,                # LiteLLM compatible model name 
-        sp='',                    # System prompt
-        temp=0,                   # Temperature
-        search=False,             # Search (l,m,h), if model supports it
-        tools:list=None,          # Add tools
-        hist:list=None,           # Chat history
-        ns:Optional[dict]=None,   # Custom namespace for tool calling 
-        cache=False,              # Anthropic prompt caching
-        cache_idxs:list=[-1],     # Anthropic cache breakpoint idxs, use `0` for sys prompt if provided
-        ttl=None,                 # Anthropic prompt caching ttl
-        api_base=None,            # API base URL for custom providers
-        api_key=None,             # API key for custom providers
-        extra_headers=None,       # Extra HTTP headers for custom providers
-        tc_refs=False,            # Enable tool call result references
-        tc_res_eval=False,        # literal_eval tool results before storing in tc_res
+        model: str,                                  # LiteLLM compatible model name 
+        sp: str='',                                  # System prompt
+        temp: float=0,                               # Temperature
+        search: bool=False,                          # Search (l,m,h), if model supports it
+        tools: list[Callable]=None,                  # Add tools
+        hist: list=None,                             # Chat history
+        ns: Optional[dict]=None,                     # Custom namespace for tool calling 
+        cache: bool=False,                           # Anthropic prompt caching
+        cache_idxs: list[int]=[-1],                  # Anthropic cache breakpoint idxs, use `0` for sys prompt if provided
+        ttl: Optional[str]=None,                     # Anthropic prompt caching ttl
+        api_base: Optional[str]=None,                # API base URL for custom providers
+        api_key: Optional[str]=None,                 # API key for custom providers
+        extra_headers: Optional[dict]=None,          # Extra HTTP headers for custom providers
+        tc_refs: bool=False,                         # Enable tool call result references
+        tc_res_eval: bool=False,                     # literal_eval tool results before storing in tc_res
+        cache_strategy: Union[CacheStrategy, str]="" # cache strategy
     ):
         "LiteLLM chat client."
+        # build caching strategy enum
+        if not cache_strategy: self.cache_strategy = CacheStrategy.unspecified
+        elif not isinstance(cache_strategy, CacheStrategy):
+            try: self.cache_strategy = CacheStrategy[cache_strategy]
+            except: self.cache_strategy = CacheStrategy.unspecified
+        else: self.cache_strategy = cache_strategy
+        # set rest
         self.model = model
         self.tc_res = {} if tc_refs else None
         if tc_refs: sp = f"{sp}\n\n{tc_res_sysp}" if sp else tc_res_sysp
-        hist,tools = mk_msgs(hist,cache,cache_idxs,ttl),listify(tools)
+        hist = mk_msgs(hist,cache,cache_idxs,ttl)
+        tools = listify(tools)
         if ns is None and tools: ns = mk_ns(tools)
         elif ns is None: ns = globals()
         self.tool_schemas = [lite_mk_func(t) for t in tools] if tools else None
@@ -379,7 +430,7 @@ class Chat:
         else:
             cache_idxs = self.cache_idxs
         if msg: self.hist = self.hist+[msg]
-        self.hist = mk_msgs(self.hist, self.cache and 'claude' in self.model, cache_idxs, self.ttl)
+        self.hist = mk_msgs(self.hist, self.cache and 'claude' in self.model, cache_idxs, self.ttl, cache_strategy=self.cache_strategy)
         pf = [{"role":"assistant","content":prefill}] if prefill else []
         return sp + self.hist + pf
 
@@ -400,25 +451,6 @@ def _handle_stop_reason(res):
     if sr == 'pause_turn': return 'retry', None
     return None, None
 
-
-# %% ../nbs/00_core.ipynb #4f58a3c9
-@patch
-def _prep_call(self:Chat, prefill, search, max_tokens, kwargs) -> tuple[Any, Union[int, None]]:
-    "Prepare model info, prefill, search, and provider kwargs for a completion call"
-    try: model_info = get_model_info(self.model)
-    except Exception:
-        register_model({self.model: {}})
-        model_info = get_model_info(self.model)
-    if max_tokens is None: max_tokens = model_info.get('max_output_tokens')
-    if max_tokens is not None:
-        max_tokens = int(max_tokens)
-    if not model_info.get("supports_assistant_prefill"): prefill = None
-    if _has_search(self.model) and (s:=ifnone(search,self.search)): kwargs['web_search_options'] = {"search_context_size": effort[s]}
-    else: kwargs.pop('web_search_options', None)
-    if self.api_base: kwargs['api_base'] = self.api_base
-    if self.api_key: kwargs['api_key'] = self.api_key
-    if self.extra_headers: kwargs['extra_headers'] = self.extra_headers
-    return prefill, max_tokens
 
 # %% ../nbs/00_core.ipynb #fa528e85
 @patch
@@ -462,6 +494,25 @@ def _call(self:Chat, msg=None, prefill=None, temp=None, think=None, search=None,
             for t in tool_results:
                 if len(t['content'])>1000: t['content'] = _cwe_msg + _trunc_str(t['content'], mx=1000)
             yield from self._call(None, prefill, temp, think, search, stream, max_steps, max_steps, final_prompt, 'none', **kwargs)
+
+# %% ../nbs/00_core.ipynb #4f58a3c9
+@patch
+def _prep_call(self:Chat, prefill, search, max_tokens, kwargs) -> tuple[Any, Union[int, None]]:
+    "Prepare model info, prefill, search, and provider kwargs for a completion call"
+    try: model_info = get_model_info(self.model)
+    except Exception:
+        register_model({self.model: {}})
+        model_info = get_model_info(self.model)
+    if max_tokens is None: max_tokens = model_info.get('max_output_tokens')
+    if max_tokens is not None:
+        max_tokens = int(max_tokens)
+    if not model_info.get("supports_assistant_prefill"): prefill = None
+    if _has_search(self.model) and (s:=ifnone(search,self.search)): kwargs['web_search_options'] = {"search_context_size": effort[s]}
+    else: kwargs.pop('web_search_options', None)
+    if self.api_base: kwargs['api_base'] = self.api_base
+    if self.api_key: kwargs['api_key'] = self.api_key
+    if self.extra_headers: kwargs['extra_headers'] = self.extra_headers
+    return prefill, max_tokens
 
 # %% ../nbs/00_core.ipynb #266f3d5d
 @patch
