@@ -439,7 +439,7 @@ class Chat:
             try: self.history_strategy = HistoryStrategy[history_strategy]
             except: self.history_strategy = HistoryStrategy.unspecified
         else: self.history_strategy = history_strategy
-    
+
     def _prep_msg(self, msg=Union[dict, list[dict], None], prefill=None) -> list:
         "Prepare the messages list for the API call"
         sp = [{"role": "system", "content": self.sp}] if self.sp else []
@@ -463,29 +463,31 @@ class Chat:
         pf = [{"role":"assistant","content":prefill}] if prefill else []
 
         if len(self.hist) == lm: # new messages only - no casing needed
-            return sp + self.hist + pf
+            ret = sp + self.hist + pf
+            return ret
 
         # exclude messages based on history strategy - can assume there is history
         if self.history_strategy == HistoryStrategy.unspecified or self.history_strategy == HistoryStrategy.keep_all:
-            return sp + self.hist + pf
+            ret = sp + self.hist + pf
         elif self.history_strategy == HistoryStrategy.no_history:
-            if msg: return self.hist[-lm:] + pf
-            else: return pf
+            if msg: ret =  self.hist[-lm:] + pf
+            else: ret =  pf
         elif self.history_strategy == HistoryStrategy.system_only:
-            if msg: return sp + self.hist[-lm:] + pf
-            else: return sp + pf
+            if msg: ret =  sp + self.hist[-lm:] + pf
+            else: ret = sp + pf
         elif self.history_strategy == HistoryStrategy.user_only:
             if not msg: # no new message
-                return sp + [m for m in self.hist if m["role"] == "user"] + pf
+                ret =  sp + [m for m in self.hist if m["role"] == "user"] + pf
             else: # history and new messages
-                return sp + [m for m in self.hist[:-lm] if m["role"] == "user"] +  self.hist[-lm:] + pf
+                ret =  sp + [m for m in self.hist[:-lm] if m["role"] == "user"] +  self.hist[-lm:] + pf
         elif self.history_strategy == HistoryStrategy.no_tooling:
             if not msg: # no new message
-                return sp + [m for m in self.hist if m["role"] != "tool" and ("tool_calls" not in m)] + pf
+                ret =  sp + [m for m in self.hist if m["role"] != "tool" and (not m.get("tool_calls", None))] + pf
             else: # history and new messages
-                return sp + [m for m in self.hist[:-lm] if m["role"] != "tool" and ("tool_calls" not in m)] +  self.hist[-lm:] + pf
+                ret =  sp + [m for m in self.hist[:-lm] if m["role"] != "tool" and (not m.get("tool_calls", None))] +  self.hist[-lm:] + pf
         else:
-            return []
+            ret =  []
+        return ret
 
 # %% ../nbs/00_core.ipynb #d356b12a
 def _filter_srvtools(tcs): return L(tcs).filter(lambda o: not o.id.startswith('srvtoolu_')) if tcs else None
@@ -538,8 +540,8 @@ def _call(self:Chat, msg:Union[dict, list, None]=None, prefill=None, temp=None, 
         tool_results=[_lite_call_func(tc, self.tool_schemas, self.ns, tc_res=self.tc_res, tc_res_eval=self.tc_res_eval) for tc in tcs]
         for r in tool_results: yield r
         if step>=max_steps:
-            prompt,tool_choice,search = tool_results+final_prompt,'none',False
-        else: prompt = tool_results
+            prompt,tool_choice,search = [self.hist.pop(-1)]+tool_results+final_prompt,'none',False
+        else: prompt = [self.hist.pop(-1)]+tool_results
         try: yield from self._call(
             prompt, prefill, temp, think, search, stream, max_steps, step+1,
             final_prompt, tool_choice, **kwargs)
@@ -677,8 +679,8 @@ class AsyncChat(Chat):
                 tool_results.append(result)
                 yield result    
             if step>=max_steps-1:
-                prompt,tool_choice,search = tool_results + final_prompt,'none',False
-            else: prompt = tool_results
+                prompt,tool_choice,search = [self.hist.pop(-1)] + tool_results + final_prompt,'none',False
+            else: prompt = [self.hist.pop(-1)] + tool_results
             try:
                 async for result in self._call(
                     prompt, prefill, temp, think, search, stream, max_steps, step+1,
