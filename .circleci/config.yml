@@ -1,0 +1,46 @@
+version: 2.1
+
+executors:
+  build-executor:
+    resource_class: small
+    docker:
+      - image: ghcr.io/astral-sh/uv:python3.12-bookworm
+    working_directory: ~/project
+
+jobs:
+  build_tag:
+    executor: build-executor
+    steps:
+      - checkout
+      - when:
+          condition:
+            or:
+              - { equal: [<< pipeline.git.branch >>, "main"] }
+              - matches:
+                  pattern: "^release/.*$"
+                  value: << pipeline.git.branch >>
+          steps:
+            - run:
+                name: Generate Tag
+                command: |
+                  ./scripts/generate_tag.sh "./"
+            - run:
+                name: Bump Ver
+                command: |
+                  ssh-keyscan -t ed25519 github.com >> ~/.ssh/known_hosts
+                  ./scripts/bump_ver_git_tag.sh
+      - when:
+          condition:
+            not: { equal: [<< pipeline.git.branch >>, "main"] }
+          steps:
+            - run:
+                name: Bump Dev Ver
+                command: |
+                  ./scripts/generate_dev_ver.sh "./"
+
+workflows:
+  lisette:
+    jobs:
+      - build_tag:
+          context:
+            - org-global
