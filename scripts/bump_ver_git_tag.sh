@@ -15,7 +15,7 @@ git config --global user.name "$CIRCLE_USERNAME"
 if [[ "$NEW_TAG" ]]; then
     echo "Updating to $NEW_TAG"
 
-    ./scripts/update_version.sh "${NEW_TAG}" python/
+    ./scripts/update_version.sh "${NEW_TAG}" ./
 
     git add .
     git diff-index --quiet HEAD || git commit -m "version bump by CircleCI ${NEW_TAG} [skip ci]"

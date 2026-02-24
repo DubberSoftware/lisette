@@ -7,17 +7,11 @@ executors:
       - image: ghcr.io/astral-sh/uv:python3.12-bookworm
     working_directory: ~/project
 
-orbs:
-  aws-cli: circleci/aws-cli@4.1.1
-
 jobs:
   build_tag:
     executor: build-executor
     steps:
       - checkout
-      - restore_cache:
-          name: restore python cache
-          key: python-{{ checksum "python/uv.lock" }}
       - when:
           condition:
             or:
@@ -29,7 +23,7 @@ jobs:
             - run:
                 name: Generate Tag
                 command: |
-                  ./scripts/generate_tag.sh "python/"
+                  ./scripts/generate_tag.sh "./"
             - run:
                 name: Bump Ver
                 command: |
@@ -42,7 +36,7 @@ jobs:
             - run:
                 name: Bump Dev Ver
                 command: |
-                  ./scripts/generate_dev_ver.sh "python/"
+                  ./scripts/generate_dev_ver.sh "./"
 
 workflows:
   lisette:
@@ -50,4 +44,3 @@ workflows:
       - build_tag:
           context:
             - org-global
-            - prod

@@ -4,6 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lisette"
+version = "0.4.40"
 dynamic = ["version"]
 description = "litellm helper"
 readme = "README.md"
