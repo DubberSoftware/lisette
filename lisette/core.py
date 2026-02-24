@@ -6,9 +6,9 @@
 __all__ = ['sonn45', 'opus45', 'opus46', 'tool_dtls_tag', 're_tools', 'token_dtls_tag', 're_token', 'effort', 'tc_res_sysp',
            'patch_litellm', 'remove_cache_ckpts', 'contents', 'stop_reason', 'mk_msg', 'fmt2hist', 'CacheStrategy',
            'mk_msgs', 'stream_with_complete', 'lite_mk_func', 'ToolResponse', 'structured', 'cite_footnote',
-           'cite_footnotes', 'mk_stream_chunk', 'Chat', 'add_warning', 'random_tool_id', 'mk_tc', 'mk_tc_req',
-           'mk_tc_result', 'mk_tc_results', 'astream_with_complete', 'AsyncChat', 'mk_tr_details', 'fmt_usage',
-           'StreamFormatter', 'AsyncStreamFormatter', 'display_stream', 'adisplay_stream']
+           'cite_footnotes', 'mk_stream_chunk', 'HistoryStrategy', 'Chat', 'add_warning', 'random_tool_id', 'mk_tc',
+           'mk_tc_req', 'mk_tc_result', 'mk_tc_results', 'astream_with_complete', 'AsyncChat', 'mk_tr_details',
+           'fmt_usage', 'StreamFormatter', 'AsyncStreamFormatter', 'display_stream', 'adisplay_stream']
 
 # %% ../nbs/00_core.ipynb #82380377
 import asyncio, base64, json, litellm, mimetypes, random, string, ast
@@ -382,34 +382,39 @@ For example, if a tool call returns result with id 'toolu_abc123', you can use i
 {"content": "$`toolu_abc123`"}
 This is useful when chaining tools, e.g., reading data with one tool and passing it to another."""
 
+# %% ../nbs/00_core.ipynb #1961bcc1
+class HistoryStrategy(str, Enum):
+    unspecified = "unspecified" # ignore strategy
+    no_history = "no_history" # never store anything
+    system_only = "system_only" # only retain system prompt in history
+    user_only = "user_only" # exclude old tool messages and assistant messages
+    no_tooling = "no_tooling" # only retain user and system messages in history
+    keep_all = "keep_all" # retain full history
+
+
 # %% ../nbs/00_core.ipynb #a9ece479
 class Chat:
     def __init__(
         self,
-        model: str,                                  # LiteLLM compatible model name 
-        sp: str='',                                  # System prompt
-        temp: float=0,                               # Temperature
-        search: bool=False,                          # Search (l,m,h), if model supports it
-        tools: list[Callable]=None,                  # Add tools
-        hist: list=None,                             # Chat history
-        ns: Optional[dict]=None,                     # Custom namespace for tool calling 
-        cache: bool=False,                           # Anthropic prompt caching
-        cache_idxs: list[int]=[-1],                  # Anthropic cache breakpoint idxs, use `0` for sys prompt if provided
-        ttl: Optional[str]=None,                     # Anthropic prompt caching ttl
-        api_base: Optional[str]=None,                # API base URL for custom providers
-        api_key: Optional[str]=None,                 # API key for custom providers
-        extra_headers: Optional[dict]=None,          # Extra HTTP headers for custom providers
-        tc_refs: bool=False,                         # Enable tool call result references
-        tc_res_eval: bool=False,                     # literal_eval tool results before storing in tc_res
-        cache_strategy: Union[CacheStrategy, str]="" # cache strategy
+        model: str,                         # LiteLLM compatible model name 
+        sp: str='',                         # System prompt
+        temp: float=0,                      # Temperature
+        search: bool=False,                 # Search (l,m,h), if model supports it
+        tools: list[Callable]=None,         # Add tools
+        hist: list=None,                    # Chat history
+        ns: Optional[dict]=None,            # Custom namespace for tool calling 
+        cache: bool=False,                  # Anthropic prompt caching
+        cache_idxs: list[int]=[-1],         # Anthropic cache breakpoint idxs, use `0` for sys prompt if provided
+        ttl: Optional[str]=None,            # Anthropic prompt caching ttl
+        api_base: Optional[str]=None,       # API base URL for custom providers
+        api_key: Optional[str]=None,        # API key for custom providers
+        extra_headers: Optional[dict]=None, # Extra HTTP headers for custom providers
+        tc_refs: bool=False,                # Enable tool call result references
+        tc_res_eval: bool=False,            # literal_eval tool results before storing in tc_res
+        cache_strategy: str="",             # cache strategy - see CacheStrategy enum for possible values - empty string mapped to unspecified
+        history_strategy: str="",           # history strategy - see HistoryStrategy enum for possible values - empty string mapped to unspecified
     ):
         "LiteLLM chat client."
-        # build caching strategy enum
-        if not cache_strategy: self.cache_strategy = CacheStrategy.unspecified
-        elif not isinstance(cache_strategy, CacheStrategy):
-            try: self.cache_strategy = CacheStrategy[cache_strategy]
-            except: self.cache_strategy = CacheStrategy.unspecified
-        else: self.cache_strategy = cache_strategy
         # set rest
         self.model = model
         self.tc_res = {} if tc_refs else None
@@ -420,8 +425,22 @@ class Chat:
         elif ns is None: ns = globals()
         self.tool_schemas = [lite_mk_func(t) for t in tools] if tools else None
         store_attr()
-    
-    def _prep_msg(self, msg=None, prefill=None):
+
+        # build caching strategy enum - done after store_attr() to avoid it being overwritten
+        if not cache_strategy: self.cache_strategy = CacheStrategy.unspecified
+        elif not isinstance(cache_strategy, CacheStrategy):
+            try: self.cache_strategy = CacheStrategy[cache_strategy]
+            except: self.cache_strategy = CacheStrategy.unspecified
+        else: self.cache_strategy = cache_strategy
+
+        # build history strategy enum
+        if not history_strategy: self.history_strategy = HistoryStrategy.unspecified
+        elif not isinstance(history_strategy, HistoryStrategy):
+            try: self.history_strategy = HistoryStrategy[history_strategy]
+            except: self.history_strategy = HistoryStrategy.unspecified
+        else: self.history_strategy = history_strategy
+
+    def _prep_msg(self, msg=Union[dict, list[dict], None], prefill=None) -> list:
         "Prepare the messages list for the API call"
         sp = [{"role": "system", "content": self.sp}] if self.sp else []
         if sp:
@@ -429,10 +448,46 @@ class Chat:
             cache_idxs = L(self.cache_idxs).filter().map(lambda o: o-1 if o>0 else o)
         else:
             cache_idxs = self.cache_idxs
-        if msg: self.hist = self.hist+[msg]
+
+        # add messages to history and save num new messages
+        if isinstance(msg, dict) or isinstance(msg, Message):
+            self.hist = self.hist+[msg]
+            lm = 1
+        elif isinstance(msg, list):
+            self.hist += msg
+            lm = len(msg)
+        else: lm = 0
+
+        # add message caching
         self.hist = mk_msgs(self.hist, self.cache and 'claude' in self.model, cache_idxs, self.ttl, cache_strategy=self.cache_strategy)
         pf = [{"role":"assistant","content":prefill}] if prefill else []
-        return sp + self.hist + pf
+
+        if len(self.hist) == lm: # new messages only - no casing needed
+            ret = sp + self.hist + pf
+            return ret
+
+        # exclude messages based on history strategy - can assume there is history
+        if self.history_strategy == HistoryStrategy.unspecified or self.history_strategy == HistoryStrategy.keep_all:
+            ret = sp + self.hist + pf
+        elif self.history_strategy == HistoryStrategy.no_history:
+            if msg: ret =  self.hist[-lm:] + pf
+            else: ret =  pf
+        elif self.history_strategy == HistoryStrategy.system_only:
+            if msg: ret =  sp + self.hist[-lm:] + pf
+            else: ret = sp + pf
+        elif self.history_strategy == HistoryStrategy.user_only:
+            if not msg: # no new message
+                ret =  sp + [m for m in self.hist if m["role"] == "user"] + pf
+            else: # history and new messages
+                ret =  sp + [m for m in self.hist[:-lm] if m["role"] == "user"] +  self.hist[-lm:] + pf
+        elif self.history_strategy == HistoryStrategy.no_tooling:
+            if not msg: # no new message
+                ret =  sp + [m for m in self.hist if m["role"] != "tool" and (not m.get("tool_calls", None))] + pf
+            else: # history and new messages
+                ret =  sp + [m for m in self.hist[:-lm] if m["role"] != "tool" and (not m.get("tool_calls", None))] +  self.hist[-lm:] + pf
+        else:
+            ret =  []
+        return ret
 
 # %% ../nbs/00_core.ipynb #d356b12a
 def _filter_srvtools(tcs): return L(tcs).filter(lambda o: not o.id.startswith('srvtoolu_')) if tcs else None
@@ -454,7 +509,7 @@ def _handle_stop_reason(res):
 
 # %% ../nbs/00_core.ipynb #fa528e85
 @patch
-def _call(self:Chat, msg=None, prefill=None, temp=None, think=None, search=None, stream=False,
+def _call(self:Chat, msg:Union[dict, list, None]=None, prefill=None, temp=None, think=None, search=None, stream=False,
         max_steps=2, step=1, final_prompt=None, tool_choice=None, max_tokens=None, **kwargs):
     "Internal method that always yields responses"
     if step>max_steps+1: return
@@ -483,10 +538,10 @@ def _call(self:Chat, msg=None, prefill=None, temp=None, think=None, search=None,
     yield res
     if tcs := _filter_srvtools(m.tool_calls):
         tool_results=[_lite_call_func(tc, self.tool_schemas, self.ns, tc_res=self.tc_res, tc_res_eval=self.tc_res_eval) for tc in tcs]
-        self.hist+=tool_results
         for r in tool_results: yield r
-        if step>=max_steps: prompt,tool_choice,search = final_prompt,'none',False
-        else: prompt = None
+        if step>=max_steps:
+            prompt,tool_choice,search = [self.hist.pop(-1)]+tool_results+final_prompt,'none',False
+        else: prompt = [self.hist.pop(-1)]+tool_results
         try: yield from self._call(
             prompt, prefill, temp, think, search, stream, max_steps, step+1,
             final_prompt, tool_choice, **kwargs)
@@ -589,7 +644,7 @@ async def astream_with_complete(self, agen, postproc=noop):
 
 # %% ../nbs/00_core.ipynb #f354e37b
 class AsyncChat(Chat):
-    async def _call(self, msg=None, prefill=None, temp=None, think=None, search=None, stream=False, max_steps=2, step=1,
+    async def _call(self, msg:Union[dict, list, None]=None, prefill=None, temp=None, think=None, search=None, stream=False, max_steps=2, step=1,
             final_prompt=None, tool_choice=None, max_tokens=None, **kwargs):
         if step>max_steps+1: return
         prefill, max_tokens = self._prep_call(prefill, search, max_tokens, kwargs)
@@ -622,10 +677,10 @@ class AsyncChat(Chat):
             for tc in tcs:
                 result = await _alite_call_func(tc, self.tool_schemas, self.ns, tc_res=self.tc_res, tc_res_eval=self.tc_res_eval)
                 tool_results.append(result)
-                yield result
-            self.hist+=tool_results
-            if step>=max_steps-1: prompt,tool_choice,search = final_prompt,'none',False
-            else: prompt = None
+                yield result    
+            if step>=max_steps-1:
+                prompt,tool_choice,search = [self.hist.pop(-1)] + tool_results + final_prompt,'none',False
+            else: prompt = [self.hist.pop(-1)] + tool_results
             try:
                 async for result in self._call(
                     prompt, prefill, temp, think, search, stream, max_steps, step+1,
