@@ -21,7 +21,7 @@ if [[ -z "$DIRECTORY" ]]; then
     exit 1
 fi
 
-VERSION=$(grep '^version = ' "$DIRECTORY/pyproject.toml" | sed 's/.*version = "\(.*\)"/\1/')
+VERSION=$(grep '^version = "' "$DIRECTORY/pyproject.toml" | sed 's/.*version = "\(.*\)"/\1/')
 MAJOR="${VERSION%%.*}"; VERSION="${VERSION#*.}"
 MINOR="${VERSION%%.*}"; VERSION="${VERSION#*.}"
 PATCH="${VERSION%%.*}"; VERSION="${VERSION#*.}"
