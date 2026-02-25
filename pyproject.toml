@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lisette"
-version = "0.4.40"
+version = "0.4.41"
 dynamic = ["version"]
 description = "litellm helper"
 readme = "README.md"
@@ -38,9 +38,6 @@ dev = [
     "ipykernel>=6.29.5",
     "jupyter>=1.1.1",
 ]
-
-[tool.setuptools.dynamic]
-version = {attr = "lisette.__version__"}
 
 [tool.setuptools.packages.find]
 include = ["lisette"]
