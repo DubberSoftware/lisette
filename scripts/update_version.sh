@@ -17,10 +17,10 @@ echo "bumping version in $DIRECTORY"
 # Update version in pyproject.toml and lisette/__init__.py
 if [[ "$OSTYPE" == "darwin"* ]]; then
     # macOS
-    sed -i '' "s|^version = \".*\"|version = \"$VERSION\"|" "$DIRECTORY/pyproject.toml"
-    sed -i '' "s|^__version__ = \".*\"|__version__ = \"$VERSION\"|" "$DIRECTORY/lisette/__init__.py"
+    sed -i '' 's|^version = ".*"|version = "'"$VERSION"'"|' "$DIRECTORY/pyproject.toml"
+    sed -i '' 's|^__version__ = ".*"|__version__ = "'"$VERSION"'"|' "$DIRECTORY/lisette/__init__.py"
 else
     # Linux
-    sed -i "s|^version = \".*\"|version = \"$VERSION\"|" "$DIRECTORY/pyproject.toml"
-    sed -i "s|^__version__ = \".*\"|__version__ = \"$VERSION\"|" "$DIRECTORY/lisette/__init__.py"
+    sed -i 's|^version = ".*"|version = "'"$VERSION"'"|' "$DIRECTORY/pyproject.toml"
+    sed -i 's|^__version__ = ".*"|__version__ = "'"$VERSION"'"|' "$DIRECTORY/lisette/__init__.py"
 fi
