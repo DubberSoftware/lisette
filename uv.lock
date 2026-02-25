@@ -1101,6 +1101,7 @@ wheels = [
 
 [[package]]
 name = "lisette"
+version = "0.0.42"
 source = { editable = "." }
 dependencies = [
     { name = "fastcore" },
