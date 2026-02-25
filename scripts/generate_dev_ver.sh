@@ -23,10 +23,10 @@ NEW_VERSION="${VERSION}.dev+${GIT_HASH}"
 # Update version in pyproject.toml and lisette/__init__.py
 if [[ "$OSTYPE" == "darwin"* ]]; then
     # macOS
-    sed -i '' "s/^version = \".*\"/version = \"$NEW_VERSION\"/" "$DIRECTORY/pyproject.toml"
-    sed -i '' "s/^__version__ = \".*\"/__version__ = \"$NEW_VERSION\"/" "$DIRECTORY/lisette/__init__.py"
+    sed -i '' "s|^version = \".*\"|version = \"$NEW_VERSION\"|" "$DIRECTORY/pyproject.toml"
+    sed -i '' "s|^__version__ = \".*\"|__version__ = \"$NEW_VERSION\"|" "$DIRECTORY/lisette/__init__.py"
 else
     # Linux
-    sed -i "s/^version = \".*\"/version = \"$NEW_VERSION\"/" "$DIRECTORY/pyproject.toml"
-    sed -i "s/^__version__ = \".*\"/__version__ = \"$NEW_VERSION\"/" "$DIRECTORY/lisette/__init__.py"
+    sed -i "s|^version = \".*\"|version = \"$NEW_VERSION\"|" "$DIRECTORY/pyproject.toml"
+    sed -i "s|^__version__ = \".*\"|__version__ = \"$NEW_VERSION\"|" "$DIRECTORY/lisette/__init__.py"
 fi
