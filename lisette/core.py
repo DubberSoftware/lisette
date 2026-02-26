@@ -510,7 +510,7 @@ def _handle_stop_reason(res):
 # %% ../nbs/00_core.ipynb #fa528e85
 @patch
 def _call(self:Chat, msg:Union[dict, list, None]=None, prefill=None, temp=None, think=None, search=None, stream=False,
-        max_steps=2, step=1, final_prompt=None, tool_choice=None, max_tokens=None, **kwargs):
+        max_steps=2, step=1, final_prompt:dict=_final_prompt, tool_choice=None, max_tokens=None, **kwargs):
     "Internal method that always yields responses"
     if step>max_steps+1: return
     prefill, max_tokens = self._prep_call(prefill, search, max_tokens, kwargs)
@@ -540,7 +540,7 @@ def _call(self:Chat, msg:Union[dict, list, None]=None, prefill=None, temp=None, 
         tool_results=[_lite_call_func(tc, self.tool_schemas, self.ns, tc_res=self.tc_res, tc_res_eval=self.tc_res_eval) for tc in tcs]
         for r in tool_results: yield r
         if step>=max_steps:
-            prompt,tool_choice,search = [self.hist.pop(-1)]+tool_results+final_prompt,'none',False
+            prompt,tool_choice,search = [self.hist.pop(-1)]+tool_results+[final_prompt], 'none', False
         else: prompt = [self.hist.pop(-1)]+tool_results
         try: yield from self._call(
             prompt, prefill, temp, think, search, stream, max_steps, step+1,
@@ -645,7 +645,7 @@ async def astream_with_complete(self, agen, postproc=noop):
 # %% ../nbs/00_core.ipynb #f354e37b
 class AsyncChat(Chat):
     async def _call(self, msg:Union[dict, list, None]=None, prefill=None, temp=None, think=None, search=None, stream=False, max_steps=2, step=1,
-            final_prompt=None, tool_choice=None, max_tokens=None, **kwargs):
+            final_prompt:dict=_final_prompt, tool_choice=None, max_tokens=None, **kwargs):
         if step>max_steps+1: return
         prefill, max_tokens = self._prep_call(prefill, search, max_tokens, kwargs)
         res = await acompletion(model=self.model, messages=self._prep_msg(msg, prefill), stream=stream,
@@ -679,7 +679,7 @@ class AsyncChat(Chat):
                 tool_results.append(result)
                 yield result    
             if step>=max_steps-1:
-                prompt,tool_choice,search = [self.hist.pop(-1)] + tool_results + final_prompt,'none',False
+                prompt,tool_choice,search = [self.hist.pop(-1)] + tool_results + [final_prompt], 'none', False
             else: prompt = [self.hist.pop(-1)] + tool_results
             try:
                 async for result in self._call(
