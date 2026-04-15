@@ -6,9 +6,10 @@
 __all__ = ['sonn45', 'opus45', 'opus46', 'tool_dtls_tag', 're_tools', 'token_dtls_tag', 're_token', 'effort', 'tc_res_sysp',
            'patch_litellm', 'remove_cache_ckpts', 'contents', 'stop_reason', 'mk_msg', 'fmt2hist', 'CacheStrategy',
            'mk_msgs', 'stream_with_complete', 'lite_mk_func', 'ToolResponse', 'structured', 'cite_footnote',
-           'cite_footnotes', 'mk_stream_chunk', 'HistoryStrategy', 'Chat', 'add_warning', 'random_tool_id', 'mk_tc',
-           'mk_tc_req', 'mk_tc_result', 'mk_tc_results', 'astream_with_complete', 'AsyncChat', 'mk_tr_details',
-           'fmt_usage', 'StreamFormatter', 'AsyncStreamFormatter', 'display_stream', 'adisplay_stream']
+           'cite_footnotes', 'mk_stream_chunk', 'HistoryStrategy', 'ToolStrategy', 'Chat', 'add_warning',
+           'random_tool_id', 'mk_tc', 'mk_tc_req', 'mk_tc_result', 'mk_tc_results', 'astream_with_complete',
+           'AsyncChat', 'mk_tr_details', 'fmt_usage', 'StreamFormatter', 'AsyncStreamFormatter', 'display_stream',
+           'adisplay_stream']
 
 # %% ../nbs/00_core.ipynb #82380377
 import asyncio, base64, json, litellm, mimetypes, random, string, ast
@@ -312,16 +313,28 @@ def _try_eval(o):
 # %% ../nbs/00_core.ipynb #c4d81d05
 def _lite_call_func(tc, tool_schemas, ns, raise_on_err=True, tc_res=None, tc_res_eval=False):
     fn, valid = tc.function.name, {nested_idx(o,'function','name') for o in tool_schemas or []}
-    if fn not in valid: res = f"Tool not defined in tool_schemas: {fn}"
+    success = True
+    if fn not in valid:
+        res = f"Tool not defined in tool_schemas: {fn}"
+        success = False
     else:
         try: fargs = _resolve_tool_refs(tc.function.arguments, tc_res)
-        except json.JSONDecodeError: res = f"Failed to parse function arguments: {tc.function.arguments}"
+        except json.JSONDecodeError:
+            res = f"Failed to parse function arguments: {tc.function.arguments}"
+            success = False
         else:
-            res = call_func(fn, fargs, ns=ns)
-            res = res.content if isinstance(res, ToolResponse) else res
+            try:
+                res = call_func(fn, fargs, ns=ns)
+                res = res.content if isinstance(res, ToolResponse) else res
+                # Handle tuple[str, bool] return type
+                if isinstance(res, tuple) and len(res) == 2 and isinstance(res[1], bool):
+                    res, success = res
+            except Exception as e:
+                res = f"Tool call failure: {e}"
+                success = False
     if tc_res is not None: tc_res[tc.id] = _try_eval(res) if tc_res_eval else res
     content = _prep_tool_res(res, tc.id) if tc_res is not None else str(res)
-    return {"tool_call_id": tc.id, "role": "tool", "name": fn, "content": content}
+    return {"tool_call_id": tc.id, "role": "tool", "name": fn, "content": content, "success": success}
 
 # %% ../nbs/00_core.ipynb #4688cf77
 @delegates(completion)
@@ -392,6 +405,14 @@ class HistoryStrategy(str, Enum):
     keep_all = "keep_all" # retain full history
 
 
+# %% ../nbs/00_core.ipynb #7f5ea777
+class ToolStrategy(str, Enum):
+    unspecified = "unspecified" # ignore strategy - same behaviour as full_loop
+    full_loop = "full_loop" # standard behaviour - keeps looping until LLM stops acalling tools/runs out of tool calls then gets final response
+    first_success = "first_success" # as soon as a single tool call is successful, breaks the loop with no final response
+
+
+
 # %% ../nbs/00_core.ipynb #a9ece479
 class Chat:
     def __init__(
@@ -413,6 +434,7 @@ class Chat:
         tc_res_eval: bool=False,            # literal_eval tool results before storing in tc_res
         cache_strategy: str="",             # cache strategy - see CacheStrategy enum for possible values - empty string mapped to unspecified
         history_strategy: str="",           # history strategy - see HistoryStrategy enum for possible values - empty string mapped to unspecified
+        tool_strategy: str="",              # tool strategy - see ToolStrategy enum for possible valies - empty string mapped to unspecified
     ):
         "LiteLLM chat client."
         # set rest
@@ -439,6 +461,13 @@ class Chat:
             try: self.history_strategy = HistoryStrategy[history_strategy]
             except: self.history_strategy = HistoryStrategy.unspecified
         else: self.history_strategy = history_strategy
+
+        # build tool_strategy enum
+        if not tool_strategy: self.tool_strategy = ToolStrategy.unspecified
+        elif not isinstance(tool_strategy, ToolStrategy):
+            try: self.tool_strategy = ToolStrategy[tool_strategy]
+            except: self.tool_strategy = ToolStrategy.unspecified
+        else: self.tool_strategy = tool_strategy
 
     def _prep_msg(self, msg=Union[dict, list[dict], None], prefill=None) -> list:
         "Prepare the messages list for the API call"
@@ -539,6 +568,8 @@ def _call(self:Chat, msg:Union[dict, list, None]=None, prefill=None, temp=None, 
     if tcs := _filter_srvtools(m.tool_calls):
         tool_results=[_lite_call_func(tc, self.tool_schemas, self.ns, tc_res=self.tc_res, tc_res_eval=self.tc_res_eval) for tc in tcs]
         for r in tool_results: yield r
+        if self.tool_strategy == ToolStrategy.first_success and all([t.get("success") for t in tool_results]):
+            return
         if step>=max_steps:
             prompt,tool_choice,search = [self.hist.pop(-1)]+tool_results+[final_prompt], 'none', False
         else: prompt = [self.hist.pop(-1)]+tool_results
@@ -621,16 +652,28 @@ def mk_tc_results(tcq, results): return [mk_tc_result(a,b) for a,b in zip(tcq.to
 # %% ../nbs/00_core.ipynb #d934ac41
 async def _alite_call_func(tc, tool_schemas, ns, raise_on_err=True, tc_res=None, tc_res_eval=False):
     fn, valid = tc.function.name, {nested_idx(o,'function','name') for o in tool_schemas or []}
-    if fn not in valid: res = f"Tool not defined in tool_schemas: {fn}"
+    success = True
+    if fn not in valid:
+        res = f"Tool not defined in tool_schemas: {fn}"
+        success = False
     else:
         try: fargs = _resolve_tool_refs(tc.function.arguments, tc_res)
-        except json.JSONDecodeError: res = f"Failed to parse function arguments: {tc.function.arguments}"
+        except json.JSONDecodeError:
+            res = f"Failed to parse function arguments: {tc.function.arguments}"
+            success = False
         else:
-            res = await call_func_async(fn, fargs, ns=ns)
-            res = res.content if isinstance(res, ToolResponse) else res
+            try:
+                res = await call_func_async(fn, fargs, ns=ns)
+                res = res.content if isinstance(res, ToolResponse) else res
+                # Handle tuple[str, bool] return type
+                if isinstance(res, tuple) and len(res) == 2 and isinstance(res[1], bool):
+                    res, success = res
+            except Exception as e:
+                res = f"Tool call failure: {e}"
+                success = False
     if tc_res is not None: tc_res[tc.id] = _try_eval(res) if tc_res_eval else res
     content = _prep_tool_res(res, tc.id) if tc_res is not None else str(res)
-    return {"tool_call_id": tc.id, "role": "tool", "name": fn, "content": content}
+    return {"tool_call_id": tc.id, "role": "tool", "name": fn, "content": content, "success": success}
 
 # %% ../nbs/00_core.ipynb #13cf1122
 @asave_iter
@@ -677,7 +720,9 @@ class AsyncChat(Chat):
             for tc in tcs:
                 result = await _alite_call_func(tc, self.tool_schemas, self.ns, tc_res=self.tc_res, tc_res_eval=self.tc_res_eval)
                 tool_results.append(result)
-                yield result    
+                yield result
+            if self.tool_strategy == ToolStrategy.first_success and all([t.get("success") for t in tool_results]):
+                return
             if step>=max_steps-1:
                 prompt,tool_choice,search = [self.hist.pop(-1)] + tool_results + [final_prompt], 'none', False
             else: prompt = [self.hist.pop(-1)] + tool_results
