@@ -236,10 +236,10 @@ def _apply_cache_idxs(
         ms = msgs
     else:
         return
-    # claude limits cache control to at most 4 blocks (including system prompt, so 3 further)
-    # if we hit this case we assume we have cached earlier blocks in a previous call, so just cache last 4
-    if len(ms) > 3:
-        ms = ms[-3:]
+    # claude limits cache control to at most 4 blocks (including system prompt and tool definition, so 2 further)
+    # if we hit this case we assume we have cached earlier blocks in a previous call, so just cache last 2
+    if len(ms) > 2:
+        ms = ms[-2:]
     for m in ms:
         _add_cache_control(m, ttl)
 
@@ -260,7 +260,8 @@ def mk_msgs(
     for m in msgs:
         res.append(msg:=remove_cache_ckpts(mk_msg(m, role=role)))
         role = 'assistant' if msg['role'] in ('user','function', 'tool') else 'user'
-    if cache: _apply_cache_idxs(res, cache_idxs, ttl, cache_strategy)
+    if cache or cache_strategy not in [CacheStrategy.unspecified, CacheStrategy.no_caching]:
+        _apply_cache_idxs(res, cache_idxs, ttl, cache_strategy)
     return res
 
 # %% ../nbs/00_core.ipynb #9ad6fc2c
@@ -454,6 +455,10 @@ class Chat:
             try: self.cache_strategy = CacheStrategy[cache_strategy]
             except: self.cache_strategy = CacheStrategy.unspecified
         else: self.cache_strategy = cache_strategy
+
+        if self.cache_strategy not in [CacheStrategy.no_caching, CacheStrategy.unspecified] and self.tool_schemas:
+            self.tool_schemas[-1]["cache_control"] = {"type": "ephemeral"}
+            
 
         # build history strategy enum
         if not history_strategy: self.history_strategy = HistoryStrategy.unspecified
