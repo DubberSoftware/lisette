@@ -218,6 +218,7 @@ def _apply_cache_idxs(
         for i in cache_idxs:
             try: _add_cache_control(ms[i], ttl)
             except IndexError: continue
+        return  # return early for unspecified strategy
 
     ms = []
     if cache_strategy == CacheStrategy.no_caching:
@@ -240,9 +241,27 @@ def _apply_cache_idxs(
         return
     # calculate available slots dynamically based on reserved blocks (system prompt + tools)
     available_slots = max(1, MAX_CACHE_BLOCKS - reserved_blocks)
-    if len(ms) > available_slots:
-        ms = ms[-available_slots:]
+    # Handle duplicate objects in message list - same object may appear multiple times
+    # Count occurrences of each object id
+    id_counts = {}
     for m in ms:
+        mid = id(m)
+        id_counts[mid] = id_counts.get(mid, 0) + 1
+    # Select last N unique objects to cache, accounting for how many positions each will consume
+    seen_ids = set()
+    unique_ms = []
+    total_positions = 0
+    for m in reversed(ms):
+        mid = id(m)
+        if mid not in seen_ids:
+            positions_needed = id_counts[mid]  # This object appears this many times
+            if total_positions + positions_needed > available_slots:
+                break  # Adding this object would exceed limit
+            seen_ids.add(mid)
+            unique_ms.append(m)
+            total_positions += positions_needed
+    # Apply cache to selected unique messages
+    for m in unique_ms:
         _add_cache_control(m, ttl)
 
 # %% ../nbs/00_core.ipynb #9b326d7d
