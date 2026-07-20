@@ -7,7 +7,7 @@ name = "lisette"
 version = "0.0.48"
 description = "litellm helper"
 readme = "README.md"
-requires-python = ">=3.12, <3.13"
+requires-python = ">=3.12, <3.15"
 license = {text = "Apache-2.0"}
 authors = [{name = "AnswerDotAI", email = "support@answer.ai"}]
 keywords = ['nbdev', 'jupyter', 'notebook', 'python']
