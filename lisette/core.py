@@ -33,9 +33,9 @@ def patch_litellm(seed=0):
     from uuid import UUID
     from base64 import b64encode
     if seed is not None: random.seed(seed) # ensures random ids like tool call ids are deterministic
-    
+
     @patch
-    def __init__(self: ModelResponseBase, id=None, created=None, *args, **kwargs): 
+    def __init__(self: ModelResponseBase, id=None, created=None, *args, **kwargs):
         self._orig___init__(id='chatcmpl-xxx', created=1000000000, *args, **kwargs)
 
     @patch
@@ -72,7 +72,7 @@ def _repr_markdown_(self: litellm.ModelResponse):
     ]
     if hasattr(self, 'usage') and self.usage: details.append(f"usage: `{self.usage}`")
     det_str = '\n- '.join(details)
-    
+
     return f"""{content}
 
 <details>
@@ -92,7 +92,7 @@ def _bytes2content(data):
     "Convert bytes to litellm content dict (image, pdf, audio, video)"
     mtype = detect_mime(data)
     if not mtype: raise ValueError(f'Data must be a supported file type, got {data[:10]}')
-    encoded = base64.b64encode(data).decode("utf-8")    
+    encoded = base64.b64encode(data).decode("utf-8")
     if mtype.startswith('image/'): return {'type': 'image_url', 'image_url': f'data:{mtype};base64,{encoded}'}
     return {'type': 'file', 'file': {'file_data': f'data:{mtype};base64,{encoded}'}}
 
@@ -188,7 +188,7 @@ def fmt2hist(outp:str)->list:
         if tooljson:
             if tcr := _extract_tool(tooljson):
                 if not hist: hist.append(lm) # if LLM calls a tool without talking
-                lm.tool_calls = lm.tool_calls+[tcr[0]] if lm.tool_calls else [tcr[0]] 
+                lm.tool_calls = lm.tool_calls+[tcr[0]] if lm.tool_calls else [tcr[0]]
                 hist.append(tcr[1])
     if hist and isinstance(hist[-1], dict): hist.append(Message('.'))
     return hist
@@ -362,7 +362,7 @@ def _lite_call_func(tc, tool_schemas, ns, raise_on_err=True, tc_res=None, tc_res
 @delegates(completion)
 def structured(
     m:str,          # LiteLLM model string
-    msgs:list,      # List of messages 
+    msgs:list,      # List of messages
     tool:Callable,  # Tool to be used for creating the structured output (class, dataclass or Pydantic, function, etc)
     **kwargs):
     "Return the value of the tool call (generally used for structured outputs)"
@@ -382,7 +382,7 @@ def cite_footnote(msg):
     if citation:= nested_idx(delta, 'provider_specific_fields', 'citation'):
         title = citation['title'].replace('"', '\\"')
         delta.content = f'[*]({citation["url"]} "{title}") '
-        
+
 def cite_footnotes(stream_list):
     "Add markdown footnote citations to stream deltas"
     for msg in stream_list: cite_footnote(msg)
@@ -431,7 +431,8 @@ class HistoryStrategy(str, Enum):
 class ToolStrategy(str, Enum):
     unspecified = "unspecified" # ignore strategy - same behaviour as full_loop
     full_loop = "full_loop" # standard behaviour - keeps looping until LLM stops acalling tools/runs out of tool calls then gets final response
-    first_success = "first_success" # as soon as a single tool call is successful, breaks the loop with no final response
+    first_success = "first_success" # as soon as any of the parallel tool call(s) in a round is successful, breaks the loop with no final response
+    first_all_success = "first_all_success" # as soon as all of the parallel tool call(s) in a round are successful, breaks the loop with no final response
 
 
 
@@ -439,13 +440,13 @@ class ToolStrategy(str, Enum):
 class Chat:
     def __init__(
         self,
-        model: str,                         # LiteLLM compatible model name 
+        model: str,                         # LiteLLM compatible model name
         sp: str='',                         # System prompt
         temp: float=0,                      # Temperature
         search: bool=False,                 # Search (l,m,h), if model supports it
         tools: list[Callable]=None,         # Add tools
         hist: list=None,                    # Chat history
-        ns: Optional[dict]=None,            # Custom namespace for tool calling 
+        ns: Optional[dict]=None,            # Custom namespace for tool calling
         cache: bool=False,                  # Anthropic prompt caching
         cache_idxs: list[int]=[-1],         # Anthropic cache breakpoint idxs, use `0` for sys prompt if provided
         ttl: Optional[str]=None,            # Anthropic prompt caching ttl
@@ -479,7 +480,7 @@ class Chat:
 
         if self.cache_strategy not in [CacheStrategy.no_caching, CacheStrategy.unspecified] and self.tool_schemas:
             self.tool_schemas[-1]["cache_control"] = {"type": "ephemeral"}
-            
+
 
         # build history strategy enum
         if not history_strategy: self.history_strategy = HistoryStrategy.unspecified
@@ -501,10 +502,10 @@ class Chat:
         reserved_blocks = 0
         if self.tool_schemas and self.cache_strategy not in [CacheStrategy.no_caching, CacheStrategy.unspecified]:
             reserved_blocks += 1
-        
+
         sp = [{"role": "system", "content": self.sp}] if self.sp else []
         if sp:
-            if 0 in self.cache_idxs: 
+            if 0 in self.cache_idxs:
                 sp[0] = _add_cache_control(sp[0])
                 reserved_blocks += 1
             cache_idxs = L(self.cache_idxs).filter().map(lambda o: o-1 if o>0 else o)
@@ -601,7 +602,9 @@ def _call(self:Chat, msg:Union[dict, list, None]=None, prefill=None, temp=None, 
     if tcs := _filter_srvtools(m.tool_calls):
         tool_results=[_lite_call_func(tc, self.tool_schemas, self.ns, tc_res=self.tc_res, tc_res_eval=self.tc_res_eval) for tc in tcs]
         for r in tool_results: yield r
-        if self.tool_strategy == ToolStrategy.first_success and all([t.get("success") for t in tool_results]):
+        if self.tool_strategy == ToolStrategy.first_success and any([t.get("success") for t in tool_results]):
+            return
+        elif self.tool_strategy == ToolStrategy.first_all_success and all([t.get("success") for t in tool_results]):
             return
         if step>=max_steps:
             prompt,tool_choice,search = [self.hist.pop(-1)]+tool_results+[final_prompt], 'none', False
@@ -644,11 +647,11 @@ def __call__(self:Chat,
              search=None,       # Override search set on chat initialization (l,m,h)
              stream=False,      # Stream results
              max_steps=2, # Maximum number of tool calls
-             final_prompt=_final_prompt, # Final prompt when tool calls have ran out 
+             final_prompt=_final_prompt, # Final prompt when tool calls have ran out
              return_all=False,  # Returns all intermediate ModelResponses if not streaming and has tool calls
              **kwargs):
     "Main call method - handles streaming vs non-streaming"
-    result_gen = self._call(msg, prefill, temp, think, search, stream, max_steps, 1, final_prompt, **kwargs)     
+    result_gen = self._call(msg, prefill, temp, think, search, stream, max_steps, 1, final_prompt, **kwargs)
     if stream: return result_gen              # streaming
     elif return_all: return list(result_gen)  # toolloop behavior
     else: return last(result_gen)             # normal chat behavior
@@ -727,7 +730,7 @@ class AsyncChat(Chat):
         res = await acompletion(model=self.model, messages=self._prep_msg(msg, prefill), stream=stream,
                          tools=self.tool_schemas, reasoning_effort=effort.get(think), tool_choice=tool_choice, max_tokens=max_tokens,
                          # temperature is not supported when reasoning
-                         temperature=None if think else ifnone(temp,self.temp), 
+                         temperature=None if think else ifnone(temp,self.temp),
                          caching=self.cache and 'claude' not in self.model,
                          **kwargs)
         if stream:
@@ -754,7 +757,9 @@ class AsyncChat(Chat):
                 result = await _alite_call_func(tc, self.tool_schemas, self.ns, tc_res=self.tc_res, tc_res_eval=self.tc_res_eval)
                 tool_results.append(result)
                 yield result
-            if self.tool_strategy == ToolStrategy.first_success and all([t.get("success") for t in tool_results]):
+            if self.tool_strategy == ToolStrategy.first_success and any([t.get("success") for t in tool_results]):
+                return
+            elif self.tool_strategy == ToolStrategy.first_all_success and all([t.get("success") for t in tool_results]):
                 return
             if step>=max_steps-1:
                 prompt,tool_choice,search = [self.hist.pop(-1)] + tool_results + [final_prompt], 'none', False
@@ -782,7 +787,7 @@ async def __call__(
     search=None,       # Override search set on chat initialization (l,m,h)
     stream=False,      # Stream results
     max_steps=2, # Maximum number of tool calls
-    final_prompt=_final_prompt, # Final prompt when tool calls have ran out 
+    final_prompt=_final_prompt, # Final prompt when tool calls have ran out
     return_all=False,  # Returns all intermediate ModelResponses if not streaming and has tool calls
     **kwargs
 ):
@@ -801,7 +806,7 @@ def _trunc_param(v, mx=50):
 def mk_tr_details(tr, tc, mx=2000):
     "Create <details> block for tool call as JSON"
     args = {k:_trunc_str(v, mx=mx) for k,v in json.loads(tc.function.arguments).items()}
-    res = {'id':tr['tool_call_id'], 
+    res = {'id':tr['tool_call_id'],
            'call':{'function': tc.function.name, 'arguments': args},
            'result':_trunc_str(tr.get('content'), mx=mx),}
     params = ', '.join(f"{k}={_trunc_param(v)}" for k,v in args.items())
@@ -825,7 +830,7 @@ class StreamFormatter:
     def __init__(self, include_usage=False, mx=2000, debug=False, showthink=False):
         self.outp,self.tcs = '',{}
         store_attr()
-    
+
     def format_item(self, o):
         "Format a single item from the response stream."
         res = ''
@@ -847,7 +852,7 @@ class StreamFormatter:
             res += mk_tr_details(o, self.tcs.pop(o['tool_call_id']), mx=self.mx)
         self.outp+=res
         return res
-    
+
     def format_stream(self, rs):
         "Format the response stream for markdown display."
         for o in rs: yield self.format_item(o)
@@ -865,7 +870,7 @@ def display_stream(rs):
     except ModuleNotFoundError: raise ModuleNotFoundError("This function requires ipython. Please run `pip install ipython` to use.")
     fmt = StreamFormatter()
     md = ''
-    for o in fmt.format_stream(rs): 
+    for o in fmt.format_stream(rs):
         md+=o
         display(Markdown(md),clear=True)
     return fmt
@@ -877,7 +882,7 @@ async def adisplay_stream(rs):
     except ModuleNotFoundError: raise ModuleNotFoundError("This function requires ipython. Please run `pip install ipython` to use.")
     fmt = AsyncStreamFormatter()
     md = ''
-    async for o in fmt.format_stream(rs): 
+    async for o in fmt.format_stream(rs):
         md+=o
         display(Markdown(md),clear=True)
     return fmt
