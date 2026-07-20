@@ -602,10 +602,14 @@ def _call(self:Chat, msg:Union[dict, list, None]=None, prefill=None, temp=None, 
     if tcs := _filter_srvtools(m.tool_calls):
         tool_results=[_lite_call_func(tc, self.tool_schemas, self.ns, tc_res=self.tc_res, tc_res_eval=self.tc_res_eval) for tc in tcs]
         for r in tool_results: yield r
-        if self.tool_strategy == ToolStrategy.first_success and any([t.get("success") for t in tool_results]):
+        # for the 'first_success' and 'first_all_success' strategies, ignore any tool result status that is non-bool.
+        # if all tool results are non-bool - do not return so that LLM loop continues.
+        if self.tool_strategy == ToolStrategy.first_success and any([t.get("success") for t in tool_results if isinstance(t.get("success"), bool)]):
             return
-        elif self.tool_strategy == ToolStrategy.first_all_success and all([t.get("success") for t in tool_results]):
-            return
+        elif self.tool_strategy == ToolStrategy.first_all_success:
+            res = [t.get("success") for t in tool_results if isinstance(t.get("success"), bool)]
+            if res and all(res):
+                return
         if step>=max_steps:
             prompt,tool_choice,search = [self.hist.pop(-1)]+tool_results+[final_prompt], 'none', False
         else: prompt = [self.hist.pop(-1)]+tool_results
@@ -757,10 +761,14 @@ class AsyncChat(Chat):
                 result = await _alite_call_func(tc, self.tool_schemas, self.ns, tc_res=self.tc_res, tc_res_eval=self.tc_res_eval)
                 tool_results.append(result)
                 yield result
-            if self.tool_strategy == ToolStrategy.first_success and any([t.get("success") for t in tool_results]):
+            # for the 'first_success' and 'first_all_success' strategies, ignore any tool result status that is non-bool.
+            # if all tool results are non-bool - do not return so that LLM loop continues.
+            if self.tool_strategy == ToolStrategy.first_success and any([t.get("success") for t in tool_results if isinstance(t.get("success"), bool)]):
                 return
-            elif self.tool_strategy == ToolStrategy.first_all_success and all([t.get("success") for t in tool_results]):
-                return
+            elif self.tool_strategy == ToolStrategy.first_all_success:
+                res = [t.get("success") for t in tool_results if isinstance(t.get("success"), bool)]
+                if res and all(res):
+                    return
             if step>=max_steps-1:
                 prompt,tool_choice,search = [self.hist.pop(-1)] + tool_results + [final_prompt], 'none', False
             else: prompt = [self.hist.pop(-1)] + tool_results
