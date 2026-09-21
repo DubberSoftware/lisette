@@ -100,32 +100,48 @@ def _bytes2content(data):
 
 # %% ../nbs/00_core.ipynb #ef65f38b
 def _add_cache_control(msg,          # LiteLLM formatted msg
-                       ttl=None):    # Cache TTL: '5m' (default) or '1h'
-    "cache `msg` with default time-to-live (ttl) of 5minutes ('5m'), but can be set to '1h'."
-    cc = {"type": "ephemeral"} | ({"ttl": ttl} if ttl else {})
+                       ttl=None,     # Cache TTL: '5m' (default) or '1h'
+                       openai_format=False):  # Use OpenAI prompt_cache_breakpoint format
+    "Add cache marker to msg. Uses prompt_cache_breakpoint for OpenAI/Azure GPT 5.6+, cache_control for Anthropic."
+    if openai_format:
+        cc = {"mode": "explicit"}
+        cache_key = "prompt_cache_breakpoint"
+    else:
+        cc = {"type": "ephemeral"} | ({"ttl": ttl} if ttl else {})
+        cache_key = "cache_control"
     if tcs := msg.get('tool_calls'):
-        tcs[-1]['cache_control'] = cc
+        tcs[-1][cache_key] = cc
         return msg
     if not (content := msg.get("content")): return msg
     if isinstance(content, str): msg["content"] = [{"type": "text", "text": content}]
     if msg["content"] and msg["content"][-1].get("text"):
-        msg["content"][-1]["cache_control"] = cc
+        msg["content"][-1][cache_key] = cc
     return msg
 
 def _has_cache(msg):
-    "Check if msg has cache_control set"
-    if tcs := msg.get('tool_calls'): return 'cache_control' in tcs[-1]
+    "Check if msg has cache marker set (either cache_control or prompt_cache_breakpoint)"
+    if tcs := msg.get('tool_calls'):
+        return 'cache_control' in tcs[-1] or 'prompt_cache_breakpoint' in tcs[-1]
     content = msg.get("content")
-    return content and isinstance(content, list) and 'cache_control' in content[-1]
+    if not (content and isinstance(content, list)):
+        return False
+    last = content[-1]
+    return 'cache_control' in last or 'prompt_cache_breakpoint' in last
 
 def remove_cache_ckpts(msg):
-    "remove cache checkpoints and return msg."
+    "Remove cache checkpoints (both formats) and return msg."
     if not _has_cache(msg): return msg
     if tcs := msg.get('tool_calls'):
         tc = tcs[-1]
-        if isinstance(tc, dict): tc.pop('cache_control', None)
-        elif isinstance(tc, ChatCompletionMessageToolCall): delattr(tc, 'cache_control')
-    elif msg.get('content'): msg["content"][-1].pop('cache_control', None)
+        if isinstance(tc, dict):
+            tc.pop('cache_control', None)
+            tc.pop('prompt_cache_breakpoint', None)
+        elif isinstance(tc, ChatCompletionMessageToolCall):
+            if hasattr(tc, 'cache_control'): delattr(tc, 'cache_control')
+            if hasattr(tc, 'prompt_cache_breakpoint'): delattr(tc, 'prompt_cache_breakpoint')
+    elif msg.get('content'):
+        msg["content"][-1].pop('cache_control', None)
+        msg["content"][-1].pop('prompt_cache_breakpoint', None)
     return msg
 
 def _mk_content(o):
@@ -142,12 +158,14 @@ def stop_reason(r):
     if not r.choices: return 'unk'
     return r.choices[0].finish_reason
 
+
 # %% ../nbs/00_core.ipynb #ecb67a0e
 def mk_msg(
     content,      # Content: str, bytes (image), list of mixed content, or dict w 'role' and 'content' fields
     role="user",  # Message role if content isn't already a dict/Message
-    cache=False,  # Enable Anthropic caching
-    ttl=None      # Cache TTL: '5m' (default) or '1h'
+    cache=False,  # Enable caching
+    ttl=None,     # Cache TTL: '5m' (default) or '1h'
+    openai_format=False  # Use OpenAI prompt_cache_breakpoint format
 ):
     "Create a LiteLLM compatible message."
     if isinstance(content, dict) or isinstance(content, Message): return content
@@ -156,7 +174,8 @@ def mk_msg(
     elif isinstance(content, list): c = [_mk_content(o) for o in content]
     else: c = content
     msg = {"role": role, "content": c}
-    return _add_cache_control(msg, ttl=ttl) if cache else msg
+    return _add_cache_control(msg, ttl=ttl, openai_format=openai_format) if cache else msg
+
 
 # %% ../nbs/00_core.ipynb #8886f917
 tool_dtls_tag = "<details class='tool-usage-details'>"
@@ -213,12 +232,13 @@ def _apply_cache_idxs(
     ttl: Optional[str]=None,
     cache_strategy: CacheStrategy=CacheStrategy.unspecified,
     reserved_blocks: int=0,  # blocks already used by system prompt and tools
+    openai_format: bool=False,  # Use OpenAI prompt_cache_breakpoint format
 ):
     'Add cache control to idxs after filtering tools'
     if cache_strategy == CacheStrategy.unspecified: # use lisette default behaviour
         ms = [o for o in msgs if o['role']!='tool']
         for i in cache_idxs:
-            try: _add_cache_control(ms[i], ttl)
+            try: _add_cache_control(ms[i], ttl, openai_format=openai_format)
             except IndexError: continue
         return  # return early for unspecified strategy
 
@@ -264,16 +284,18 @@ def _apply_cache_idxs(
             total_positions += positions_needed
     # Apply cache to selected unique messages
     for m in unique_ms:
-        _add_cache_control(m, ttl)
+        _add_cache_control(m, ttl, openai_format=openai_format)
+
 
 # %% ../nbs/00_core.ipynb #9b326d7d
 def mk_msgs(
     msgs: list,                   # List of messages (each: str, bytes, list, or dict w 'role' and 'content' fields)
-    cache: bool=False,            # Enable Anthropic caching
+    cache: bool=False,            # Enable caching
     cache_idxs: list[int]=[-1],   # Cache breakpoint idxs
     ttl: Optional[str]=None,      # Cache TTL: '5m' (default) or '1h'
     cache_strategy: CacheStrategy=CacheStrategy.unspecified,
     reserved_blocks: int=0,       # Blocks already used by system prompt and tools
+    openai_format: bool=False,    # Use OpenAI prompt_cache_breakpoint format
 ):
     "Create a list of LiteLLM compatible messages."
     if not msgs: return []
@@ -284,8 +306,9 @@ def mk_msgs(
         res.append(msg:=remove_cache_ckpts(mk_msg(m, role=role)))
         role = 'assistant' if msg['role'] in ('user','function', 'tool') else 'user'
     if cache or cache_strategy not in [CacheStrategy.unspecified, CacheStrategy.no_caching]:
-        _apply_cache_idxs(res, cache_idxs, ttl, cache_strategy, reserved_blocks)
+        _apply_cache_idxs(res, cache_idxs, ttl, cache_strategy, reserved_blocks, openai_format=openai_format)
     return res
+
 
 # %% ../nbs/00_core.ipynb #9ad6fc2c
 def stream_with_complete(gen, postproc=noop):
@@ -449,9 +472,10 @@ class Chat:
         tools: list[Callable]=None,         # Add tools
         hist: list=None,                    # Chat history
         ns: Optional[dict]=None,            # Custom namespace for tool calling
-        cache: bool=False,                  # Anthropic prompt caching
-        cache_idxs: list[int]=[-1],         # Anthropic cache breakpoint idxs, use `0` for sys prompt if provided
-        ttl: Optional[str]=None,            # Anthropic prompt caching ttl
+        cache: bool=False,                  # Enable prompt caching
+        cache_idxs: list[int]=[-1],         # Cache breakpoint idxs, use `0` for sys prompt if provided
+        ttl: Optional[str]=None,            # Cache TTL (Anthropic only): '5m' (default) or '1h'
+        openai_cache_format: bool=False,    # Use OpenAI prompt_cache_breakpoint format (for Azure GPT 5.6+)
         api_base: Optional[str]=None,       # API base URL for custom providers
         api_key: Optional[str]=None,        # API key for custom providers
         extra_headers: Optional[dict]=None, # Extra HTTP headers for custom providers
@@ -481,7 +505,10 @@ class Chat:
         else: self.cache_strategy = cache_strategy
 
         if self.cache_strategy not in [CacheStrategy.no_caching, CacheStrategy.unspecified] and self.tool_schemas:
-            self.tool_schemas[-1]["cache_control"] = {"type": "ephemeral"}
+            if self.openai_cache_format:
+                self.tool_schemas[-1]["prompt_cache_breakpoint"] = {"mode": "explicit"}
+            else:
+                self.tool_schemas[-1]["cache_control"] = {"type": "ephemeral"}
 
 
         # build history strategy enum
@@ -508,7 +535,7 @@ class Chat:
         sp = [{"role": "system", "content": self.sp}] if self.sp else []
         if sp:
             if 0 in self.cache_idxs:
-                sp[0] = _add_cache_control(sp[0])
+                sp[0] = _add_cache_control(sp[0], openai_format=self.openai_cache_format)
                 reserved_blocks += 1
             cache_idxs = L(self.cache_idxs).filter().map(lambda o: o-1 if o>0 else o)
         else:
@@ -523,8 +550,9 @@ class Chat:
             lm = len(msg)
         else: lm = 0
 
-        # add message caching
-        self.hist = mk_msgs(self.hist, self.cache and 'claude' in self.model, cache_idxs, self.ttl, cache_strategy=self.cache_strategy, reserved_blocks=reserved_blocks)
+        # add message caching - explicit cache needed for Claude OR openai_cache_format
+        needs_explicit_cache = 'claude' in self.model or self.openai_cache_format
+        self.hist = mk_msgs(self.hist, self.cache and needs_explicit_cache, cache_idxs, self.ttl, cache_strategy=self.cache_strategy, reserved_blocks=reserved_blocks, openai_format=self.openai_cache_format)
         pf = [{"role":"assistant","content":prefill}] if prefill else []
 
         if len(self.hist) == lm: # new messages only - no casing needed
@@ -554,6 +582,7 @@ class Chat:
             ret =  []
         return ret
 
+
 # %% ../nbs/00_core.ipynb #d356b12a
 def _filter_srvtools(tcs): return L(tcs).filter(lambda o: not o.id.startswith('srvtoolu_')) if tcs else None
 
@@ -579,12 +608,14 @@ def _call(self:Chat, msg:Union[dict, list, None]=None, prefill=None, temp=None, 
     "Internal method that always yields responses"
     if step>max_steps+1: return
     prefill, max_tokens = self._prep_call(prefill, search, max_tokens, kwargs)
+    # Use litellm caching only for models without explicit cache markers
+    needs_explicit_cache = 'claude' in self.model or self.openai_cache_format
     res = completion(
         model=self.model, messages=self._prep_msg(msg, prefill), stream=stream, max_tokens=max_tokens,
         tools=self.tool_schemas, reasoning_effort = effort.get(think), tool_choice=tool_choice,
         # temperature is not supported when reasoning
         temperature=None if think else ifnone(temp,self.temp),
-        caching=self.cache and 'claude' not in self.model,
+        caching=self.cache and not needs_explicit_cache,
         **kwargs)
     if stream:
         if prefill: yield _mk_prefill(prefill)
@@ -622,6 +653,7 @@ def _call(self:Chat, msg:Union[dict, list, None]=None, prefill=None, temp=None, 
             for t in tool_results:
                 if len(t['content'])>1000: t['content'] = _cwe_msg + _trunc_str(t['content'], mx=1000)
             yield from self._call(None, prefill, temp, think, search, stream, max_steps, max_steps, final_prompt, 'none', **kwargs)
+
 
 # %% ../nbs/00_core.ipynb #4f58a3c9
 @patch
@@ -733,11 +765,13 @@ class AsyncChat(Chat):
             final_prompt:dict=_final_prompt, tool_choice=None, max_tokens=None, **kwargs):
         if step>max_steps+1: return
         prefill, max_tokens = self._prep_call(prefill, search, max_tokens, kwargs)
+        # Use litellm caching only for models without explicit cache markers
+        needs_explicit_cache = 'claude' in self.model or self.openai_cache_format
         res = await acompletion(model=self.model, messages=self._prep_msg(msg, prefill), stream=stream,
                          tools=self.tool_schemas, reasoning_effort=effort.get(think), tool_choice=tool_choice, max_tokens=max_tokens,
                          # temperature is not supported when reasoning
                          temperature=None if think else ifnone(temp,self.temp),
-                         caching=self.cache and 'claude' not in self.model,
+                         caching=self.cache and not needs_explicit_cache,
                          **kwargs)
         if stream:
             if prefill: yield _mk_prefill(prefill)
@@ -784,6 +818,7 @@ class AsyncChat(Chat):
                 async for result in self._call(
                     prompt, prefill, temp, think, search, stream, max_steps, step+1,
                     final_prompt, tool_choice='none', **kwargs): yield result
+
 
 # %% ../nbs/00_core.ipynb #9bc01816
 @patch
