@@ -13,10 +13,10 @@ authors = [{name = "AnswerDotAI", email = "support@answer.ai"}]
 keywords = ['nbdev', 'jupyter', 'notebook', 'python']
 classifiers = ["Natural Language :: English", "Intended Audience :: Developers", "Development Status :: 3 - Alpha", "Programming Language :: Python :: 3", "Programming Language :: Python :: 3 :: Only"]
 dependencies = [
-    'litellm~=1.91',
-    'numpydoc',
-    'toolslm',
-    'fastcore>=1.9.2'
+    'litellm~=1.102',
+    'numpydoc~=1.11.0',
+    'toolslm~=0.3.48',
+    'fastcore~=2.2.17'
 ]
 
 [project.urls]
