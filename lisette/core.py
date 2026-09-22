@@ -534,6 +534,13 @@ class Chat:
             except: self.tool_strategy = ToolStrategy.unspecified
         else: self.tool_strategy = tool_strategy
 
+    @property
+    def cache_enabled(self) -> bool:
+        "Whether prompt caching is enabled (cache=True or active cache_strategy). no_caching overrides cache=True."
+        if self.cache_strategy == CacheStrategy.no_caching:
+            return False
+        return self.cache or self.cache_strategy != CacheStrategy.unspecified
+
     def _prep_msg(self, msg=Union[dict, list[dict], None], prefill=None) -> list:
         "Prepare the messages list for the API call"
         # Calculate reserved blocks for tools and system prompt
@@ -563,7 +570,7 @@ class Chat:
 
         # add message caching - explicit cache needed for Claude OR openai_cache_format
         needs_explicit_cache = 'claude' in self.model or self.openai_cache_format
-        self.hist = mk_msgs(self.hist, self.cache and needs_explicit_cache, cache_idxs, self.ttl, cache_strategy=self.cache_strategy, reserved_blocks=reserved_blocks, openai_format=self.openai_cache_format)
+        self.hist = mk_msgs(self.hist, self.cache_enabled and needs_explicit_cache, cache_idxs, self.ttl, cache_strategy=self.cache_strategy, reserved_blocks=reserved_blocks, openai_format=self.openai_cache_format)
         pf = [{"role":"assistant","content":prefill}] if prefill else []
 
         if len(self.hist) == lm: # new messages only - no casing needed
@@ -623,8 +630,8 @@ def _call(self:Chat, msg:Union[dict, list, None]=None, prefill=None, temp=None, 
     needs_explicit_cache = 'claude' in self.model or self.openai_cache_format
     # For OpenAI with explicit breakpoints, set prompt_cache_options to explicit mode
     # This prevents OpenAI from auto-caching beyond our explicit breakpoints
-    if self.openai_cache_format and self.cache and 'prompt_cache_options' not in kwargs:
-        kwargs['prompt_cache_options'] = {"mode": "explicit"}
+    if self.openai_cache_format and self.cache_enabled:
+        kwargs.setdefault('prompt_cache_options', {"mode": "explicit"})
     res = completion(
         model=self.model, messages=self._prep_msg(msg, prefill), stream=stream, max_tokens=max_tokens,
         tools=self.tool_schemas, reasoning_effort = effort.get(think), tool_choice=tool_choice,
@@ -784,8 +791,8 @@ class AsyncChat(Chat):
         needs_explicit_cache = 'claude' in self.model or self.openai_cache_format
         # For OpenAI with explicit breakpoints, set prompt_cache_options to explicit mode
         # This prevents OpenAI from auto-caching beyond our explicit breakpoints
-        if self.openai_cache_format and self.cache and 'prompt_cache_options' not in kwargs:
-            kwargs['prompt_cache_options'] = {"mode": "explicit"}
+        if self.openai_cache_format and self.cache_enabled:
+            kwargs.setdefault('prompt_cache_options', {"mode": "explicit"})
         res = await acompletion(model=self.model, messages=self._prep_msg(msg, prefill), stream=stream,
                          tools=self.tool_schemas, reasoning_effort=effort.get(think), tool_choice=tool_choice, max_tokens=max_tokens,
                          # temperature is not supported when reasoning
